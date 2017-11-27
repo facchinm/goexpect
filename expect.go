@@ -24,8 +24,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
-
-	"github.com/google/goterm/term"
 )
 
 // DefaultTimeout is the default Expect timeout.
@@ -495,8 +493,6 @@ type Expecter interface {
 
 // GExpect implements the Expecter interface.
 type GExpect struct {
-	// pty holds the virtual terminal used to interact with the spawned commands.
-	pty *term.PTY
 	// cmd contains the cmd information for the spawned process.
 	cmd *exec.Cmd
 	ssh *ssh.Session
@@ -522,23 +518,6 @@ type GExpect struct {
 	// mu protects the output buffer. It must be held for any operations on out.
 	mu  sync.Mutex
 	out bytes.Buffer
-}
-
-// String implements the stringer interface.
-func (e *GExpect) String() string {
-	res := fmt.Sprintf("%p: ", e)
-	if e.pty != nil {
-		_, name := e.pty.PTSName()
-		res += fmt.Sprintf("pty: %s ", name)
-	}
-	switch {
-	case e.cmd != nil:
-		res += fmt.Sprintf("cmd: %s(%d) ", e.cmd.Path, e.cmd.Process.Pid)
-	case e.ssh != nil:
-		res += fmt.Sprint("ssh session ")
-	}
-	res += fmt.Sprintf("buf: %q", e.out.String())
-	return res
 }
 
 // ExpectBatch takes an array of BatchEntry and executes them in order filling in the BatchRes
@@ -659,7 +638,7 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 
 			if e.verbose {
 				if e.verboseWriter != nil {
-					vStr := fmt.Sprintln(term.Green("Match for RE:").String() + fmt.Sprintf(" %q found: %q Buffer: %s", rs[i].String(), match, tbuf.String()))
+					vStr := fmt.Sprintln("Match for RE:" + fmt.Sprintf(" %q found: %q Buffer: %s", rs[i].String(), match, tbuf.String()))
 					for n, bytesRead, err := 0, 0, error(nil); bytesRead < len(vStr); bytesRead += n {
 						n, err = e.verboseWriter.Write([]byte(vStr)[n:])
 						if err != nil {
@@ -843,140 +822,11 @@ func SpawnFake(b []Batcher, timeout time.Duration, opt ...Option) (*GExpect, <-c
 	}, timeout, opt...)
 }
 
-// Spawn starts a new process and collects the output. The error channel returns the result of the
-// command Spawned when it finishes.
-func Spawn(command string, timeout time.Duration, opts ...Option) (*GExpect, <-chan error, error) {
-	pty, err := term.OpenPTY()
-	if err != nil {
-		return nil, nil, err
-	}
-	var t term.Termios
-	t.Raw()
-	t.Set(pty.Slave)
-
-	if timeout < 1 {
-		timeout = DefaultTimeout
-	}
-	// Get the command up and running
-	args := strings.Fields(command)
-	cmd := exec.Command(args[0], args[1:]...)
-	// This ties the commands Stdin,Stdout & Stderr to the virtual terminal we created
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = pty.Slave, pty.Slave, pty.Slave
-	// New process needs to be the process leader and control of a tty
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid:  true,
-		Setctty: true}
-	e := &GExpect{
-		rcv:         make(chan struct{}),
-		snd:         make(chan string),
-		cmd:         cmd,
-		timeout:     timeout,
-		chkDuration: checkDuration,
-		pty:         pty,
-		cls: func(e *GExpect) error {
-			if e.cmd != nil {
-				return e.cmd.Process.Kill()
-			}
-			return nil
-		},
-		chk: func(e *GExpect) bool {
-			if e.cmd.Process == nil {
-				return false
-			}
-			// Sending Signal 0 to a process returns nil if process can take a signal , something else if not.
-			return e.cmd.Process.Signal(syscall.Signal(0)) == nil
-		},
-	}
-	for _, o := range opts {
-		o(e)
-	}
-
-	res := make(chan error, 1)
-	go e.runcmd(res)
-	// Wait until command started
-	return e, res, <-res
-}
-
-// SpawnSSH starts an interactive SSH session,ties it to a PTY and collects the output. The returned channel sends the
-// state of the SSH session after it finishes.
-func SpawnSSH(sshClient *ssh.Client, timeout time.Duration, opts ...Option) (*GExpect, <-chan error, error) {
-	tios := term.Termios{}
-	tios.Raw()
-	tios.Wz.WsCol, tios.Wz.WsRow = sshTermWidth, sshTermHeight
-	return SpawnSSHPTY(sshClient, timeout, tios, opts...)
-}
-
 const (
 	sshTerm       = "xterm"
 	sshTermWidth  = 132
 	sshTermHeight = 43
 )
-
-// SpawnSSHPTY starts an interactive SSH session and ties it to a local PTY, optionally requests a remote PTY.
-func SpawnSSHPTY(sshClient *ssh.Client, timeout time.Duration, term term.Termios, opts ...Option) (*GExpect, <-chan error, error) {
-	if sshClient == nil {
-		return nil, nil, errors.New("*ssh.Client is nil")
-	}
-	if timeout < 1 {
-		timeout = DefaultTimeout
-	}
-	// Setup interactive session
-	session, err := sshClient.NewSession()
-	if err != nil {
-		return nil, nil, err
-	}
-	e := &GExpect{
-		rcv: make(chan struct{}),
-		snd: make(chan string),
-		chk: func(e *GExpect) bool {
-			if e.ssh == nil {
-				return false
-			}
-			_, err := e.ssh.SendRequest("dummy", false, nil)
-			return err == nil
-		},
-		cls: func(e *GExpect) error {
-			if e.ssh != nil {
-				return e.ssh.Close()
-			}
-			return nil
-		},
-		ssh:         session,
-		timeout:     timeout,
-		chkDuration: checkDuration,
-	}
-	for _, o := range opts {
-		o(e)
-	}
-	if term.Wz.WsCol == 0 {
-		term.Wz.WsCol = sshTermWidth
-	}
-	if term.Wz.WsRow == 0 {
-		term.Wz.WsRow = sshTermHeight
-	}
-	if err := session.RequestPty(sshTerm, int(term.Wz.WsRow), int(term.Wz.WsCol), term.ToSSH()); err != nil {
-		return nil, nil, err
-	}
-	inPipe, err := session.StdinPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	outPipe, err := session.StdoutPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	errPipe, err := session.StderrPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := session.Shell(); err != nil {
-		return nil, nil, err
-	}
-	// Shell started.
-	errCh := make(chan error, 1)
-	go e.waitForSession(errCh, session.Wait, inPipe, outPipe, errPipe)
-	return e, errCh, nil
-}
 
 func (e *GExpect) waitForSession(r chan error, wait func() error, sIn io.WriteCloser, sOut io.Reader, sErr io.Reader) {
 	chDone := make(chan struct{})
@@ -1054,7 +904,7 @@ func (e *GExpect) Send(in string) error {
 	e.snd <- in
 	if e.verbose {
 		if e.verboseWriter != nil {
-			vStr := fmt.Sprintln(term.Blue("Sent:").String() + fmt.Sprintf(" %q", in))
+			vStr := fmt.Sprintln("Sent:" + fmt.Sprintf(" %q", in))
 			for n, bytesRead, err := 0, 0, error(nil); bytesRead < len(vStr); bytesRead += n {
 				n, err = e.verboseWriter.Write([]byte(vStr)[n:])
 				if err != nil {
@@ -1082,7 +932,7 @@ func (e *GExpect) runcmd(res chan error) {
 	res <- nil
 	cErr := e.cmd.Wait()
 	close(chDone)
-	e.pty.Slave.Close()
+	//e.pty.Slave.Close()
 	// make sure the read/send routines are done before closing the pty.
 	<-clean
 	res <- cErr
@@ -1097,7 +947,7 @@ func (e *GExpect) goIO(clean chan struct{}) (done chan struct{}) {
 	go e.send(done, &ptySync)
 	go func() {
 		ptySync.Wait()
-		e.pty.Master.Close()
+		//e.pty.Master.Close()
 		close(clean)
 	}()
 	return done
@@ -1117,48 +967,4 @@ func (e *GExpect) Options(opts ...Option) (prev Option) {
 		prev = o(e)
 	}
 	return prev
-}
-
-// read reads from the PTY master and forwards to active Expect function.
-func (e *GExpect) read(done chan struct{}, ptySync *sync.WaitGroup) {
-	defer ptySync.Done()
-	buf := make([]byte, bufferSize)
-	for {
-		nr, err := e.pty.Master.Read(buf)
-		if err != nil || !e.check() {
-			if err == io.EOF {
-				log.V(2).Infof("read closing down: %v", err)
-				return
-			}
-			return
-		}
-		// Add to buffer
-		e.mu.Lock()
-		e.out.Write(buf[:nr])
-		e.mu.Unlock()
-		// Ping Expect function
-		select {
-		case e.rcv <- struct{}{}:
-		default:
-		}
-	}
-}
-
-// send writes to the PTY master.
-func (e *GExpect) send(done chan struct{}, ptySync *sync.WaitGroup) {
-	defer ptySync.Done()
-	for {
-		select {
-		case <-done:
-			return
-		case sstr, ok := <-e.snd:
-			if !ok {
-				return
-			}
-			if _, err := e.pty.Master.Write([]byte(sstr)); err != nil || !e.check() {
-				log.Infof("send failed: %v", err)
-				break
-			}
-		}
-	}
 }

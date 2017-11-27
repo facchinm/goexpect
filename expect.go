@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	stdlog "log"
@@ -520,6 +519,19 @@ type GExpect struct {
 	out bytes.Buffer
 }
 
+// String implements the stringer interface.
+func (e *GExpect) String() string {
+	res := fmt.Sprintf("%p: ", e)
+	switch {
+	case e.cmd != nil:
+		res += fmt.Sprintf("cmd: %s(%d) ", e.cmd.Path, e.cmd.Process.Pid)
+	case e.ssh != nil:
+		res += fmt.Sprint("ssh session ")
+	}
+	res += fmt.Sprintf("buf: %q", e.out.String())
+	return res
+}
+
 // ExpectBatch takes an array of BatchEntry and executes them in order filling in the BatchRes
 // array for any Expect command executed.
 func (e *GExpect) ExpectBatch(batch []Batcher, timeout time.Duration) ([]BatchRes, error) {
@@ -967,4 +979,12 @@ func (e *GExpect) Options(opts ...Option) (prev Option) {
 		prev = o(e)
 	}
 	return prev
+}
+
+// read reads from the PTY master and forwards to active Expect function.
+func (e *GExpect) read(done chan struct{}, ptySync *sync.WaitGroup) {
+}
+
+// send writes to the PTY master.
+func (e *GExpect) send(done chan struct{}, ptySync *sync.WaitGroup) {
 }

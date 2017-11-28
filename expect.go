@@ -537,12 +537,14 @@ func (e *GExpect) String() string {
 func (e *GExpect) ExpectBatch(batch []Batcher, timeout time.Duration) ([]BatchRes, error) {
 	res := []BatchRes{}
 	for i, b := range batch {
+		time.Sleep(100 * time.Millisecond)
 		switch b.Cmd() {
 		case BatchExpect:
 			re, err := regexp.Compile(b.Arg())
 			if err != nil {
 				return res, err
 			}
+			//fmt.Println("Expecting " + re.String())
 			to := b.Timeout()
 			if to < 0 {
 				to = timeout
@@ -553,6 +555,7 @@ func (e *GExpect) ExpectBatch(batch []Batcher, timeout time.Duration) ([]BatchRe
 				return res, err
 			}
 		case BatchSend:
+			//fmt.Println("Sending " + b.Arg())
 			if err := e.Send(b.Arg()); err != nil {
 				return res, err
 			}
@@ -628,10 +631,11 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 	chTicker := time.NewTicker(check)
 	defer chTicker.Stop()
 	// Read in current data and start actively check for matches.
-	var tbuf bytes.Buffer
-	if _, err := io.Copy(&tbuf, e); err != nil {
+	tbuf := bytes.NewBuffer(make([]byte, 0, 50000))
+	if _, err := io.Copy(tbuf, e); err != nil {
 		return tbuf.String(), nil, -1, fmt.Errorf("io.Copy failed: %v", err)
 	}
+
 	for {
 	L1:
 		for i, c := range cs {
@@ -702,7 +706,7 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 			return o, match, i, s.Err()
 		}
 		if !e.check() {
-			nr, err := io.Copy(&tbuf, e)
+			nr, err := io.Copy(tbuf, e)
 			if err != nil {
 				return tbuf.String(), nil, -1, fmt.Errorf("io.Copy failed: %v", err)
 			}
@@ -713,7 +717,7 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 		select {
 		case <-timer.C:
 			// Expect timeout.
-			nr, err := io.Copy(&tbuf, e)
+			nr, err := io.Copy(tbuf, e)
 			if err != nil {
 				return tbuf.String(), nil, -1, fmt.Errorf("io.Copy failed: %v", err)
 			}
@@ -725,12 +729,12 @@ func (e *GExpect) ExpectSwitchCase(cs []Caser, timeout time.Duration) (string, [
 		case <-chTicker.C:
 			// Periodical timer to make sure data is handled in case the <-e.rcv channel
 			// was missed.
-			if _, err := io.Copy(&tbuf, e); err != nil {
+			if _, err := io.Copy(tbuf, e); err != nil {
 				return tbuf.String(), nil, -1, fmt.Errorf("io.Copy failed: %v", err)
 			}
 		case <-e.rcv:
 			// Data to fetch.
-			if _, err := io.Copy(&tbuf, e); err != nil {
+			if _, err := io.Copy(tbuf, e); err != nil {
 				return tbuf.String(), nil, -1, fmt.Errorf("io.Copy failed: %v", err)
 			}
 		}
